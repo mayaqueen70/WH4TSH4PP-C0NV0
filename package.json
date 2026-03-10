@@ -1,10 +1,23 @@
 {
+  "name": "whatsapp-panel",
+  "version": "1.0.0",
+  "description": "WhatsApp Loader Panel",
   "type": "module",
+  "main": "index.js",
+
+  "engines": {
+    "node": "18.x"
+  },
+
+  "scripts": {
+    "start": "node index.js"
+  },
+
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.6.0",
+    "@whiskeysockets/baileys": "6.6.0",
     "cors": "^2.8.5",
     "express": "^4.18.2",
-    "multer": "^1.4.5",
-    "pino": "^8.0.0"
+    "multer": "^1.4.5-lts.1",
+    "pino": "^8.17.0"
   }
 }
