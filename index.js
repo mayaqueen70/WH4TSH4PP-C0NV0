@@ -1,389 +1,251 @@
-import express from 'express';
-import fs from 'fs';
-import chalk from 'chalk';
-import multer from 'multer';
-import makeWASocket, { useMultiFileAuthState, makeCacheableSignalKeyStore, DisconnectReason, Browsers, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
-import pino from 'pino';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import crypto from 'crypto';
-import { Boom } from '@hapi/boom';
-import cors from 'cors';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import express from "express";
+import fs from "fs";
+import path from "path";
+import cors from "cors";
+import multer from "multer";
+import crypto from "crypto";
+import pino from "pino";
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  Browsers
+} from "@whiskeysockets/baileys";
 
 const app = express();
 const PORT = process.env.PORT || 8000;
 
-/* =========================
-   Ensure required folders
-========================= */
-const requiredFolders = ['uploads','session','public'];
-requiredFolders.forEach(folder=>{
-    if(!fs.existsSync(folder)){
-        fs.mkdirSync(folder,{recursive:true});
-        console.log(`Created folder: ${folder}`);
-    }
-});
-
-const upload = multer({ dest: 'uploads/' });
-
-/* =========================
-   Middleware
-========================= */
-
-app.use(cors({
-    origin: "*",
-    methods:["GET","POST"],
-    allowedHeaders:["Content-Type"]
-}));
-
+app.use(cors());
 app.use(express.json());
-app.use(express.urlencoded({extended:true}));
-app.use(express.static('public'));
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static("public"));
 
-app.set("trust proxy",1);
+const upload = multer({ dest: "uploads/" });
 
-/* =========================
-   Variables
-========================= */
+/* =======================
+   CREATE REQUIRED FOLDERS
+======================= */
 
-const SESSION_FILE = './running_sessions.json';
+const folders = ["session", "uploads", "public"];
 
-const userSessions = {};
+folders.forEach((f) => {
+  if (!fs.existsSync(f)) {
+    fs.mkdirSync(f);
+  }
+});
+
+/* =======================
+   VARIABLES
+======================= */
+
+const sockets = {};
 const stopFlags = {};
-const activeSockets = {};
-const messageQueues = {};
-const reconnectAttempts = {};
 
-/* =========================
-   Utils
-========================= */
+/* =======================
+   UTILS
+======================= */
 
-const saveSessions=()=>{
-    fs.writeFileSync(SESSION_FILE,JSON.stringify(userSessions,null,2));
+function generateKey() {
+  return crypto.randomBytes(10).toString("hex");
 }
 
-const generateUniqueKey=()=>{
-    return crypto.randomBytes(16).toString('hex');
+/* =======================
+   WHATSAPP CONNECT
+======================= */
+
+async function connectWhatsApp(phone, key, sendPairing) {
+  const sessionPath = "./session/" + key;
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+
+  const { version } = await fetchLatestBaileysVersion();
+
+  const sock = makeWASocket({
+    version,
+    logger: pino({ level: "silent" }),
+    browser: Browsers.macOS("Chrome"),
+    auth: state,
+    printQRInTerminal: false
+  });
+
+  sockets[key] = sock;
+
+  if (!sock.authState.creds.registered) {
+    setTimeout(async () => {
+      const code = await sock.requestPairingCode(phone);
+      sendPairing(code);
+    }, 2000);
+  }
+
+  sock.ev.on("connection.update", (update) => {
+    const { connection, lastDisconnect } = update;
+
+    if (connection === "open") {
+      console.log("WhatsApp Connected");
+    }
+
+    if (connection === "close") {
+      const reason = lastDisconnect?.error?.output?.statusCode;
+
+      if (reason !== DisconnectReason.loggedOut) {
+        connectWhatsApp(phone, key, sendPairing);
+      }
+    }
+  });
+
+  sock.ev.on("creds.update", saveCreds);
 }
 
-/* =========================
-   Messaging System
-========================= */
+/* =======================
+   ROUTES
+======================= */
 
-const startMessaging=(sock,uniqueKey,target,hatersName,messages,speed)=>{
-
-if(stopFlags[uniqueKey]?.interval){
-clearInterval(stopFlags[uniqueKey].interval);
-}
-
-if(!messageQueues[uniqueKey]){
-messageQueues[uniqueKey]={
-messages:[...messages],
-currentIndex:0,
-isSending:false
-};
-}
-
-const queue=messageQueues[uniqueKey];
-
-const sendNext=async()=>{
-
-if(stopFlags[uniqueKey]?.stopped) return;
-
-if(queue.isSending) return;
-
-queue.isSending=true;
-
-const chatId=target.includes('@g.us')?target:`${target}@s.whatsapp.net`;
-
-const msg=`${hatersName} ${queue.messages[queue.currentIndex]}`;
-
-try{
-
-await sock.sendMessage(chatId,{text:msg});
-
-queue.currentIndex++;
-
-if(queue.currentIndex>=queue.messages.length){
-queue.currentIndex=0;
-}
-
-}catch(e){
-console.log("Send error:",e.message);
-}
-
-queue.isSending=false;
-
-}
-
-const interval=parseInt(speed)*1000;
-
-stopFlags[uniqueKey]={
-
-stopped:false,
-interval:setInterval(sendNext,interval)
-
-};
-
-sendNext();
-
-}
-
-/* =========================
-   WhatsApp Connect
-========================= */
-
-const connectAndLogin=async(phoneNumber,uniqueKey,sendPairingCode=null)=>{
-
-const sessionPath=`./session/${uniqueKey}`;
-
-if(!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath,{recursive:true});
-
-const {state,saveCreds}=await useMultiFileAuthState(sessionPath);
-
-const {version}=await fetchLatestBaileysVersion();
-
-const sock=makeWASocket({
-
-version,
-logger:pino({level:"silent"}),
-browser:Browsers.windows('Firefox'),
-
-auth:{
-creds:state.creds,
-keys:makeCacheableSignalKeyStore(state.keys,pino({level:"silent"}))
-},
-
-printQRInTerminal:false
-
+app.get("/health", (req, res) => {
+  res.send("Server OK");
 });
 
-activeSockets[uniqueKey]=sock;
+app.get("/", (req, res) => {
+  const file = path.join(process.cwd(), "public/index.html");
 
-/* Pairing */
-
-if(!sock.authState.creds.registered && sendPairingCode){
-
-setTimeout(async()=>{
-
-const code=await sock.requestPairingCode(phoneNumber);
-
-sendPairingCode(code,false);
-
-},2000)
-
-}
-
-/* Events */
-
-sock.ev.on("connection.update",update=>{
-
-const {connection,lastDisconnect}=update;
-
-if(connection==="open"){
-
-userSessions[uniqueKey]={
-phoneNumber,
-uniqueKey,
-connected:true
-};
-
-saveSessions();
-
-if(sendPairingCode) sendPairingCode(null,true);
-
-}
-
-if(connection==="close"){
-
-const reason=new Boom(lastDisconnect?.error)?.output?.statusCode;
-
-if(reason!==DisconnectReason.loggedOut){
-
-setTimeout(()=>connectAndLogin(phoneNumber,uniqueKey,sendPairingCode),5000);
-
-}
-
-}
-
+  if (fs.existsSync(file)) {
+    res.sendFile(file);
+  } else {
+    res.send("Server running");
+  }
 });
 
-sock.ev.on("creds.update",saveCreds);
+/* LOGIN */
 
-}
+app.post("/login", async (req, res) => {
+  try {
+    let { phoneNumber } = req.body;
 
-/* =========================
-   Routes
-========================= */
+    if (!phoneNumber) {
+      return res.json({
+        success: false,
+        message: "Phone required"
+      });
+    }
 
-/* Health check */
+    phoneNumber = phoneNumber.replace(/[^0-9]/g, "");
 
-app.get("/health",(req,res)=>{
-res.send("Server OK");
+    const key = generateKey();
+
+    const sendPairing = (code) => {
+      res.json({
+        success: true,
+        pairingCode: code,
+        uniqueKey: key
+      });
+    };
+
+    await connectWhatsApp(phoneNumber, key, sendPairing);
+  } catch (err) {
+    res.json({
+      success: false,
+      message: err.message
+    });
+  }
 });
 
-/* Home */
+/* GET GROUPS */
 
-app.get("/",(req,res)=>{
+app.post("/getGroupUID", async (req, res) => {
+  try {
+    const { uniqueKey } = req.body;
 
-const filePath=path.join(__dirname,'public','index.html');
+    const sock = sockets[uniqueKey];
 
-if(fs.existsSync(filePath)){
-res.sendFile(filePath);
-}else{
-res.send("Server running but index.html missing");
-}
+    if (!sock) {
+      return res.json({
+        success: false,
+        message: "Not connected"
+      });
+    }
 
+    const groups = await sock.groupFetchAllParticipating();
+
+    const list = Object.values(groups).map((g) => ({
+      name: g.subject,
+      id: g.id
+    }));
+
+    res.json({
+      success: true,
+      groups: list
+    });
+  } catch (e) {
+    res.json({
+      success: false,
+      message: e.message
+    });
+  }
 });
 
-/* Login */
+/* START MESSAGE */
 
-app.post("/login",async(req,res)=>{
+app.post("/startMessaging", upload.single("file"), async (req, res) => {
+  try {
+    const { uniqueKey, target, speed } = req.body;
 
-let {phoneNumber}=req.body;
+    const sock = sockets[uniqueKey];
 
-if(!phoneNumber){
+    if (!sock) {
+      return res.json({
+        success: false,
+        message: "Not connected"
+      });
+    }
 
-return res.json({success:false,message:"Phone number required"});
+    const file = req.file.path;
 
-}
+    const text = fs.readFileSync(file, "utf8");
 
-phoneNumber=phoneNumber.replace(/[^0-9]/g,'');
+    const messages = text.split("\n").filter((m) => m.trim());
 
-const uniqueKey=generateUniqueKey();
+    let i = 0;
 
-stopFlags[uniqueKey]={stopped:false};
+    stopFlags[uniqueKey] = setInterval(async () => {
+      const msg = messages[i];
 
-const sendPairingCode=(pairingCode,connected)=>{
+      await sock.sendMessage(target, { text: msg });
 
-if(connected){
+      i++;
 
-res.json({
-success:true,
-connected:true,
-uniqueKey
+      if (i >= messages.length) {
+        i = 0;
+      }
+    }, speed * 1000);
+
+    res.json({
+      success: true
+    });
+  } catch (e) {
+    res.json({
+      success: false,
+      message: e.message
+    });
+  }
 });
 
-}else{
+/* STOP */
 
-res.json({
-success:true,
-pairingCode,
-uniqueKey
+app.post("/stop", (req, res) => {
+  const { uniqueKey } = req.body;
+
+  if (stopFlags[uniqueKey]) {
+    clearInterval(stopFlags[uniqueKey]);
+  }
+
+  res.json({
+    success: true
+  });
 });
 
-}
+/* =======================
+   SERVER START
+======================= */
 
-}
-
-await connectAndLogin(phoneNumber,uniqueKey,sendPairingCode);
-
-});
-
-/* Groups */
-
-app.post("/getGroupUID",async(req,res)=>{
-
-const {uniqueKey}=req.body;
-
-if(!activeSockets[uniqueKey]){
-
-return res.json({success:false,message:"WhatsApp not connected"});
-
-}
-
-const sock=activeSockets[uniqueKey];
-
-const groups=await sock.groupFetchAllParticipating();
-
-const list=Object.values(groups).map(g=>({
-
-groupName:g.subject,
-groupId:g.id
-
-}));
-
-res.json({success:true,groupUIDs:list});
-
-});
-
-/* Start Messaging */
-
-app.post('/startMessaging',upload.single('messageFile'),async(req,res)=>{
-
-const {uniqueKey,target,hatersName,speed}=req.body;
-
-if(!activeSockets[uniqueKey]){
-
-return res.json({success:false,message:"WhatsApp not connected"});
-
-}
-
-const file=req.file.path;
-
-const text=fs.readFileSync(file,'utf8');
-
-fs.unlinkSync(file);
-
-const messages=text.split("\n").filter(x=>x.trim());
-
-startMessaging(activeSockets[uniqueKey],uniqueKey,target,hatersName,messages,speed);
-
-res.json({
-success:true,
-messageCount:messages.length
-});
-
-});
-
-/* Stop */
-
-app.post("/stop",async(req,res)=>{
-
-const {uniqueKey}=req.body;
-
-if(stopFlags[uniqueKey]?.interval){
-
-clearInterval(stopFlags[uniqueKey].interval);
-
-}
-
-if(activeSockets[uniqueKey]){
-
-try{
-await activeSockets[uniqueKey].logout();
-}catch{}
-
-delete activeSockets[uniqueKey];
-
-}
-
-delete stopFlags[uniqueKey];
-
-delete messageQueues[uniqueKey];
-
-delete userSessions[uniqueKey];
-
-saveSessions();
-
-res.json({success:true});
-
-});
-
-/* =========================
-   Start Server
-========================= */
-
-app.listen(PORT,async()=>{
-
-console.log(`
-━━━━━━━━━━━━━━━━━━━━━━━━
-SERVER RUNNING
-PORT: ${PORT}
-━━━━━━━━━━━━━━━━━━━━━━━━
-`);
-
+app.listen(PORT, () => {
+  console.log("Server running on port " + PORT);
 });
