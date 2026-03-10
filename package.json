@@ -2,10 +2,10 @@
 "name": "whatsapp-panel",
 "version": "1.0.0",
 "description": "WhatsApp Auto Message Server by Xmarty Ayush King",
-"main": "index.js",
+"main": "server.js",
 "type": "commonjs",
 "scripts": {
-"start": "node index.js"
+"start": "node server.js"
 },
 "author": "Xmarty Ayush King",
 "license": "MIT",
@@ -17,3 +17,4 @@
 "pino": "^8.20.0"
 }
 }
+
