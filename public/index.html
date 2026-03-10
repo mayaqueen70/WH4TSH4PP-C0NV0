@@ -385,7 +385,7 @@
     <script>
         // JavaScript code remains 100% unchanged
         let currentUniqueKey = '';
-        const API_URL = "http://localhost:3000";
+        const API_URL = window.location.origin;
 
         function switchTab(tab) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -642,4 +642,5 @@
         });
     </script>
 </body>
+
 </html>
